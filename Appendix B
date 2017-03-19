@@ -1,0 +1,240 @@
+# Final-Year-Project-II-Appendices
+//Decode file parallely
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+#include <iostream>
+#include <iomanip>
+#include <time.h>
+#include <Windows.h>
+
+#define F 600		//defines number of files
+#define N 2		//number of packets
+#define M 2		//length of each packet
+
+int totalFiles[F*N][M];
+int randomForFiles[F*(N + 10)][N];
+int encodedMessage[F*(N + 10)][M];
+int GE[F*(N + 10)][N + M];
+
+using namespace std;
+
+__global__ void matrixMultiplication(int *randomMatrix, int* messageFiles, int* encodedMessage, int fileNumber)
+{
+	int Tid = threadIdx.x + blockIdx.x*blockDim.x;
+
+	if (Tid < N + 10)
+	{
+
+		for (int MsgColumn = 0; MsgColumn < M; MsgColumn++)	//set for coloumn of message matrix
+		for (int column = 0; column < N; column++)	//set for coloumn of random matrix
+			encodedMessage[fileNumber*(N + 10)*M + Tid*M + MsgColumn] = encodedMessage[fileNumber*(N + 10)*M + Tid*M + MsgColumn] ^ (randomMatrix[fileNumber*(N + 10)*N + column + Tid*N] & messageFiles[fileNumber*N*M + column*M + MsgColumn]);
+	}
+}
+
+__global__ void augmentedMatrix(int* randomMatrix, int* encodedMessage, int* GE, int fileNumber)
+{
+	int Tid = threadIdx.x + blockIdx.x*blockDim.x;
+
+	if (Tid < N + 10)
+	{
+		int encodedColumn = 0;
+		for (int geColumn = 0; geColumn < N + M; geColumn++)
+		{
+			if (geColumn < N)
+				GE[fileNumber*(N + 10)*(N + M) + Tid*(N + M) + geColumn] = randomMatrix[fileNumber*(N + 10)*N + Tid*N + geColumn];
+			else
+			{
+				GE[fileNumber*(N + 10)*(N + M) + Tid*(N + M) + geColumn] = encodedMessage[fileNumber*(N + 10)*M + Tid*M + encodedColumn];
+				encodedColumn++;
+			}
+		}
+	}
+}
+
+__global__ void swapRow(int* GE, int pivot)
+{
+	int Tid = threadIdx.x + blockIdx.x*blockDim.x;
+	if (Tid < F)
+	{
+		for (int rcheck = pivot; rcheck < N + 10; rcheck++)
+		{
+			if (GE[Tid*(N + 10)*(N + M) + rcheck*(N + M) + pivot] == 1)
+			{
+				int temp;
+				for (int col = 0; col < N + M; col++){
+					temp = GE[Tid*(N + 10)*(N + M) + rcheck*(N + M) + col];
+					GE[Tid*(N + 10)*(N + M) + rcheck*(N + M) + col] = GE[Tid*(N + 10)*(N + M) + pivot*(N + M) + col];
+					GE[Tid*(N + 10)*(N + M) + pivot*(N + M) + col] = temp;
+				}
+				break;
+			}
+		}
+	}
+}
+
+__global__ void XOR(int* GE, int pivot)
+{
+	int Bid = blockIdx.x;
+	int Tid = threadIdx.x;
+	if (GE[Bid*(N + 10)*(N + M) + Tid*(N + M) + pivot] == 1 && pivot != Tid)
+	{
+		for (int col = 0; col < N + M; col++)
+		{
+			GE[Bid*(N + 10)*(N + M) + Tid*(N + M) + col] ^= GE[Bid*(N + 10)*(N + M) + pivot*(N + M) + col];
+		}
+	}
+}
+
+
+
+int main()
+{
+	srand(time(NULL));
+	//Generate files using random generator
+	for (int row = 0; row < F*N; row++)
+	for (int column = 0; column < M; column++)
+		totalFiles[row][column] = rand() % 2;
+
+	//Print out files
+	for (int files = 0; files < F; files++)
+	{
+		cout << "The " << files + 1 << " file is: " << endl;
+		for (int i = 0; i < N; i++)
+		{
+			for (int j = 0; j < M; j++)
+			{
+				cout << setw(3) << totalFiles[i + files*N][j];
+			}
+			cout << endl;
+		}
+	}
+
+	//Generate random matrix for each files
+	for (int row = 0; row < F*(N + 10); row++)
+	for (int column = 0; column < M; column++)
+		randomForFiles[row][column] = rand() % 2;
+
+	//Print out random matrix for each files
+	for (int files = 0; files < F; files++)
+	{
+		cout << "The random matrix for " << files + 1 << " file is: " << endl;
+		for (int row = 0; row < N + 10; row++)
+		{
+			for (int column = 0; column < N; column++)
+			{
+				cout << setw(3) << randomForFiles[row + files*(N + 10)][column];
+			}
+			cout << endl;
+		}
+	}
+
+	//Passing parameter to GPU
+	int *dev_random_matrix;
+	int *dev_message_files;
+	int *dev_encoded_message;
+	int *dev_GE_files;
+	cudaError_t cuda_message_files_status, cuda_random_matrix_status;
+
+	cudaMalloc((void**)&dev_random_matrix, F*(N + 10)*N*sizeof(int));	//allocate memory in GPU for random matrix
+	cudaMalloc((void**)&dev_message_files, F*N*M*sizeof(int));			//allocate memory in GPU for message file
+	cudaMalloc((void**)&dev_encoded_message, F*(N + 10)*M*sizeof(int));	//allocate memory in GPU for encoded message
+	cudaMalloc((void**)&dev_GE_files, F*(N + 10)*(N + M)*sizeof(int));	//allocate memory in GPU for aumented matrix
+
+	cuda_random_matrix_status = cudaMemcpy(dev_random_matrix, &randomForFiles, F*(N + 10)*N*sizeof(int), cudaMemcpyHostToDevice);
+	if (cuda_random_matrix_status != cudaSuccess)
+	{
+		fprintf(stderr, "cudaMemcpy failed1!");
+		goto Error;
+	}
+
+	cuda_message_files_status = cudaMemcpy(dev_message_files, &totalFiles, F*N*M*sizeof(int), cudaMemcpyHostToDevice);
+	if (cuda_message_files_status != cudaSuccess)
+	{
+		fprintf(stderr, "cudaMemcpy failed2!");
+		goto Error;
+	}
+
+	//Perform Matrix Multiplication using GPU
+	for (int f = 0; f < F; f++)
+	{
+		matrixMultiplication << < 1, N + 10 >> >(dev_random_matrix, dev_message_files, dev_encoded_message, f);	//perform matrix multiplication using GPU
+	}
+
+	cudaDeviceSynchronize();
+
+	cudaMemcpy(encodedMessage, dev_encoded_message, F*(N + 10)*M*sizeof(int), cudaMemcpyDeviceToHost);
+
+	//Print out encoded message
+	for (int files = 0; files < F; files++)
+	{
+		cout << "The encoded message for " << files + 1 << " file is" << endl;
+		for (int row = 0; row < N + 10; row++)
+		{
+			for (int column = 0; column < M; column++)
+			{
+				cout << setw(3) << encodedMessage[row + files*(N + 10)][column];
+			}
+			cout << endl;
+		}
+	}
+
+	//Form Augmented Matrix
+	for (int f = 0; f < F; f++)
+	{
+		augmentedMatrix << < 1, N + 10 >> >(dev_random_matrix, dev_encoded_message, dev_GE_files, f);
+	}
+
+	cudaDeviceSynchronize();
+
+	cudaMemcpy(GE, dev_GE_files, F*(N + 10)*(N + M)*sizeof(int), cudaMemcpyDeviceToHost);
+
+	//Print out Augmented Matrix
+	for (int files = 0; files < F; files++)
+	{
+		cout << "The Augmented matrix for " << files + 1 << " files is" << endl;
+		for (int msgRow = 0; msgRow < N + 10; msgRow++)
+		{
+			for (int msgColumn = 0; msgColumn < N + M; msgColumn++)
+			{
+				cout << setw(3) << GE[files*(N + 10) + msgRow][msgColumn];
+			}
+			cout << endl;
+		}
+	}
+
+	DWORD start, stop;
+	start = GetTickCount();
+	//Peform pivot search and swap
+	for (int pivot = 0; pivot < N; pivot++)
+	{
+		swapRow << <F, 1 >> >(dev_GE_files, pivot);
+		XOR << <F, N + 10 >> >(dev_GE_files, pivot);
+	}
+	cudaDeviceSynchronize();
+	stop = GetTickCount();
+
+	cudaMemcpy(GE, dev_GE_files, F*(N + 10)*(N + M)*sizeof(int), cudaMemcpyDeviceToHost);
+
+	//Print Out result
+	for (int files = 0; files < F; files++)
+	{
+		cout << "The decoded message for " << files + 1 << " files is" << endl;
+		for (int msgRow = 0; msgRow < N + 10; msgRow++)
+		{
+			for (int msgColumn = 0; msgColumn < N + M; msgColumn++)
+			{
+				cout << setw(3) << GE[files*(N + 10) + msgRow][msgColumn];
+			}
+			cout << endl;
+		}
+	}
+Error:
+	cudaFree(dev_random_matrix);
+	cudaFree(dev_message_files);
+	cudaFree(dev_encoded_message);
+	cudaFree(dev_GE_files);
+
+	printf("Decoding time = %d ms\n", stop - start);
+
+	return 0;
+}
